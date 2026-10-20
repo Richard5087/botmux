@@ -23,6 +23,11 @@ vi.mock('../src/im/lark/client.js', () => ({
   MessageWithdrawnError: class MessageWithdrawnError extends Error {},
 }));
 
+const platformTerminalBaseUrlMock = vi.fn(() => null as string | null);
+vi.mock('../src/platform/binding.js', () => ({
+  platformTerminalBaseUrl: () => platformTerminalBaseUrlMock(),
+}));
+
 vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => ({
     config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code' },
@@ -60,6 +65,7 @@ vi.mock('../src/services/session-store.js', () => ({
   getSession: vi.fn(),
 }));
 
+const readableTerminalUrlMock = vi.fn(() => 'https://example.com/term');
 const isSessionTransferringMock = vi.fn(() => false);
 const sessionAcceptsDirectCommandMock = vi.fn(() => true);
 const closeSessionMock = vi.fn(async () => ({ ok: true, outcome: 'closed', alreadyClosed: false }));
@@ -81,7 +87,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
   writableTerminalLinkFor: vi.fn(() => undefined),
   workerHasInitialized: vi.fn(() => true),
   sessionSupportsWebTerminal: vi.fn(() => true),
-  readableTerminalUrlFor: vi.fn(() => 'https://example.com/term'),
+  readableTerminalUrlFor: (...args: any[]) => readableTerminalUrlMock(...args),
   resolvePrivateCardAudience: vi.fn(() => []),
   deliverWriteLinkCard: (...args: any[]) => deliverWriteLinkCardMock(...args),
   deliverEphemeralOrReply: (...args: any[]) => deliverEphemeralOrReplyMock(...args),
@@ -132,14 +138,21 @@ vi.mock('../src/services/local-cli-opener.js', () => ({
   preflightLocalCliOpen: vi.fn(() => ({ ok: false })),
 }));
 
-vi.mock('../src/global-config.js', () => ({ readGlobalConfig: vi.fn(() => ({})) }));
+const remoteAccessEnabledMock = vi.fn(() => false);
+vi.mock('../src/global-config.js', () => ({
+  readGlobalConfig: vi.fn(() => ({})),
+  isRemoteAccessEnabled: () => remoteAccessEnabledMock(),
+}));
 
 const staticModelChoicesMock = vi.fn(() => ['fable', 'opus', 'sonnet', 'haiku']);
 const detectModelsMock = vi.fn(async () => null);
 vi.mock('../src/services/model-catalog.js', () => ({
   staticModelChoices: (...args: any[]) => staticModelChoicesMock(...args),
   detectModels: (...args: any[]) => detectModelsMock(...args),
-  mergeModelChoices: (stat: string[], live: string[] | null) => ({ models: live && live.length ? [...stat, ...live] : [...stat] }),
+  // Mirror the real helper: a non-empty live catalogue wins; static is only
+  // the fallback when live probing returns null/empty.
+  mergeModelChoices: (stat: string[], live: string[] | null) => ({ models: live && live.length ? [...live] : [...stat] }),
+  runtimeExecutableForBotSelection: () => undefined,
 }));
 
 import { handleCardAction } from '../src/im/lark/card-handler.js';
@@ -243,12 +256,15 @@ beforeEach(() => {
     botOpenId: 'ou_bot',
   } as any);
   isSessionTransferringMock.mockReset().mockReturnValue(false);
+  readableTerminalUrlMock.mockReset().mockReturnValue('https://example.com/term');
   sessionAcceptsDirectCommandMock.mockReset().mockReturnValue(true);
   closeSessionMock.mockClear();
   deliverWriteLinkCardMock.mockClear();
   deliverEphemeralOrReplyMock.mockClear();
   staticModelChoicesMock.mockReset().mockImplementation(() => ['fable', 'opus', 'sonnet', 'haiku']);
   detectModelsMock.mockReset().mockResolvedValue(null);
+  remoteAccessEnabledMock.mockReset().mockReturnValue(false);
+  platformTerminalBaseUrlMock.mockReset().mockReturnValue(null);
 });
 
 // ─── toggle gate ──────────────────────────────────────────────────────────
@@ -362,7 +378,7 @@ describe('reply_card_menu model option', () => {
     expect(select.options.find((o: any) => o.value === 'sonnet').text.content).toContain('当前');
   });
 
-  it('includes live-detected models alongside the curated list', async () => {
+  it('prefers a non-empty live catalogue over the curated list', async () => {
     enableMenu();
     detectModelsMock.mockResolvedValue(['claude-sonnet-5', 'custom-x']);
     const ds = makeDs();
@@ -370,7 +386,8 @@ describe('reply_card_menu model option', () => {
     await result.afterAck();
     const select = JSON.parse(deliverEphemeralOrReplyMock.mock.calls[0][2])
       .elements.find((e: any) => e.tag === 'action').actions[0];
-    expect(select.options.map((o: any) => o.value)).toEqual(['fable', 'opus', 'sonnet', 'haiku', 'claude-sonnet-5', 'custom-x']);
+    // Live non-empty is authoritative; static curated entries are the fallback only.
+    expect(select.options.map((o: any) => o.value)).toEqual(['claude-sonnet-5', 'custom-x']);
   });
 
   it('posts an empty-catalogue notice when the CLI has no enumerated models', async () => {
@@ -510,9 +527,93 @@ describe('model picker option sanitisation', () => {
     const select = JSON.parse(deliverEphemeralOrReplyMock.mock.calls[0][2])
       .elements.find((e: any) => e.tag === 'action').actions[0];
     const values = select.options.map((o: any) => o.value);
-    expect(values).toContain('fable');
     expect(values).toContain('good-model');
     expect(values).not.toContain('has space');
     expect(values).not.toContain('../evil');
+    expect(values).not.toContain('x'.repeat(130));
+  });
+});
+
+// ─── P2-b: model catalogue key must carry wrapper/launch mode ─────────────
+
+describe('model catalogue selection key', () => {
+  it('probes with the wrapper-composed key, not the bare frozen cliId', async () => {
+    enableMenu();
+    const seenKeys: string[] = [];
+    staticModelChoicesMock.mockImplementation((key: string) => { seenKeys.push(key); return ['glm-5.1']; });
+    detectModelsMock.mockResolvedValue([]);
+    const ds = makeDs({ sessionOverrides: { cliId: 'codex', wrapperCli: 'ttadk codex' } as any });
+    const result = await handleCardAction(menuData('model'), depsWith(ds), LARK_APP_ID);
+    await result.afterAck();
+    expect(seenKeys.length).toBeGreaterThan(0);
+    expect(seenKeys.every(k => k === 'ttadk-x-codex')).toBe(true);
+  });
+
+  it('submission whitelist uses the same wrapper-composed key', async () => {
+    enableMenu();
+    const seenKeys: string[] = [];
+    staticModelChoicesMock.mockImplementation((key: string) => { seenKeys.push(key); return ['glm-5.1']; });
+    detectModelsMock.mockResolvedValue([]);
+    const ds = makeDs({ sessionOverrides: { cliId: 'codex', wrapperCli: 'ttadk codex' } as any });
+    const deliver = vi.fn();
+    // A native-codex slug must NOT pass for a gateway session.
+    await handleCardAction(pickData('gpt-5.6-sol'), depsWith(ds, deliver), LARK_APP_ID);
+    expect(deliver).not.toHaveBeenCalled();
+    // The gateway slug passes and is injected.
+    const deliver2 = vi.fn();
+    const ok = await handleCardAction(pickData('glm-5.1'), depsWith(ds, deliver2), LARK_APP_ID);
+    expect(deliver2).toHaveBeenCalledTimes(1);
+    expect(deliver2.mock.calls[0][1]).toBe('/model glm-5.1');
+    expect(ok.toast.type).toBe('success');
+    expect(seenKeys.every(k => k === 'ttadk-x-codex')).toBe(true);
+  });
+});
+
+// ─── P2-c: bound-to-platform deployments get the read-only front door ──────
+
+describe('reply_card_menu terminal option under a bound platform', () => {
+  it('delivers a read-only card (no write token, manage buttons off) and no write-link toast', async () => {
+    enableMenu();
+    remoteAccessEnabledMock.mockReturnValue(true);
+    platformTerminalBaseUrlMock.mockReturnValue('https://t-m1.example.com');
+    const ds = makeDs({ workerPort: 9000, workerToken: 'write-tok', workerViewToken: 'view-tok' } as any);
+    readableTerminalUrlMock.mockReturnValue('https://t-m1.example.com/s/sess-menu-1?viewToken=view-tok');
+    const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
+    expect(deliverWriteLinkCardMock).not.toHaveBeenCalled();
+    expect(deliverEphemeralOrReplyMock).toHaveBeenCalledTimes(1);
+    const card = JSON.parse(deliverEphemeralOrReplyMock.mock.calls[0][2]);
+    const buttons = card.elements.find((e: any) => e.tag === 'action').actions;
+    const open = buttons.find((b: any) => b.multi_url);
+    expect(JSON.stringify(open.multi_url)).toContain('viewToken=view-tok');
+    expect(JSON.stringify(open.multi_url)).not.toContain('write-tok');
+    expect(JSON.stringify(open.multi_url)).toContain('t-m1.example.com');
+    // Explicit write-link fallback survives as a gated callback button.
+    expect(buttons.some((b: any) => b.value?.action === 'get_write_link')).toBe(true);
+    expect(buttons.some((b: any) => b.value?.action === 'close')).toBe(true);
+    expect(buttons.some((b: any) => b.value?.action === 'restart')).toBe(false);
+    // No "write link sent" toast on the read-only path.
+    expect(result.toast).toBeUndefined();
+  });
+
+  it('keeps the private write-link path on riff sessions even when platform-bound', async () => {
+    enableMenu();
+    remoteAccessEnabledMock.mockReturnValue(true);
+    platformTerminalBaseUrlMock.mockReturnValue('https://t-m1.example.com');
+    const ds = makeDs({ riffAccessUrl: 'https://aio.example/x', workerPort: null, workerToken: null } as any);
+    const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
+    expect(deliverWriteLinkCardMock).toHaveBeenCalledTimes(1);
+    expect(deliverEphemeralOrReplyMock).not.toHaveBeenCalled();
+    const cardJson = deliverWriteLinkCardMock.mock.calls[0][2];
+    expect(cardJson).toContain('https://aio.example/x');
+    expect(result.toast.type).toBe('success');
+  });
+
+  it('keeps the private write-link path when the machine is not platform-bound', async () => {
+    enableMenu();
+    // remote access off / no binding: mocks reset to false/null in beforeEach.
+    const ds = makeDs({ workerPort: 9000, workerToken: 'tok' } as any);
+    const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
+    expect(deliverWriteLinkCardMock).toHaveBeenCalledTimes(1);
+    expect(result.toast.type).toBe('success');
   });
 });

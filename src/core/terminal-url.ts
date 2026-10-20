@@ -75,6 +75,15 @@ function withCapability(base: string, name: 'token' | 'viewToken', value: string
   return value ? `${base}?${name}=${encodeURIComponent(value)}` : base;
 }
 
+/** Whether read-only terminal links route through the central platform's
+ * authenticated front door (remote access on AND this machine is bound).
+ * When true, issuing a read-only `viewToken` link is enough: an owner signed in
+ * via the platform (Feishu SSO) is upgraded to write by terminal-write-auth,
+ * while teammates/guests stay read-only — no private write token needed. */
+export function platformTerminalReadEntryActive(): boolean {
+  return isRemoteAccessEnabled() && !!platformTerminalBaseUrl();
+}
+
 export function buildTerminalUrl(
   ds: TerminalUrlSession,
   opts: { write?: boolean; viewScope?: 'card' | 'worker' } = {},
