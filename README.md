@@ -20,6 +20,8 @@
   <a href="README.en.md">English</a>
 </p>
 
+https://github.com/user-attachments/assets/2cd97623-6b92-42ea-a9e9-75c6f5434db6
+
 ---
 
 Daemon 监听飞书消息，为每个新会话自动 spawn 一个独立的会话进程，把 AI 编程 CLI / Agent 的输出实时流式回传成飞书卡片，并提供可交互的 Web 终端。它**不重造 Agent 能力**，而是直接桥接你已经在用的工具（**20+ CLI / Agent 适配器**，见 [支持的 CLI / Agent](#支持的-cli--agent)）。
@@ -78,7 +80,7 @@ npm 包内带的是**同一个自包含二进制**（按 os/arch 只装匹配的
 
 ## 按 Bot 设置零注入
 
-在 Dashboard → 自定义中心 →「按 Bot 设置零注入」勾选一个或多个 bot，批量开启或恢复原配置；支持搜索与全选当前结果，每个 bot 独立保存，失败项会保留勾选供重试。也可在对应 `bots.json` 条目设置 `"promptInjection": "none"`。适合 lead-bot 派活、sub-bot 专注执行的场景。`default` / 删除字段恢复原行为，既有 prompt、角色和技能配置不会被清空。
+在 Dashboard →「Bot 配置」→ 选中 Bot →「高级」→「零注入」打开开关；需要统一管理多个 Bot 时，在「Agent 配置」里开启「零注入」分组，关联的 Bot 会随同步一起切换（此时 Bot 配置页的开关锁定）。也可在对应 `bots.json` 条目设置 `"promptInjection": "none"`。适合 lead-bot 派活、sub-bot 专注执行的场景。`default` / 删除字段恢复原行为，既有 prompt、角色和技能配置不会被清空。当前 CLI、终端后端或沙盒组合不支持时开关置灰并说明原因。
 
 此模式只传任务正文与附件信息，跳过 botmux 的系统提示、逐轮提醒、身份信封、角色、白板、记忆与技能目录；自动从 CLI 转写回传最终回答。使用新会话验证：已经进入历史的提示无法撤回，CLI 原生系统提示、项目 `AGENTS.md` 及用户自行安装的技能仍由 CLI 管理。
 
@@ -91,6 +93,8 @@ npm 包内带的是**同一个自包含二进制**（按 os/arch 只装匹配的
 没有通过 @ 发起 bot 回报时，已建立签名回报绑定的 `botmux dispatch --bot-app <稳定 App ID>` 派单仍可自动回报原 lead：sub 的 daemon 根据绑定去掉自动附加的 report/send 指令，每轮最终回答回报一次，不自动判定任务完成。回报使用独立重试和持久化去重回执，失败不影响子会话回复；lead 正常在原会话回复，不进入 HTTP 结果轮询。提交结果不明时拒绝自动重放。`dispatch --into` 向此前没有派单记录的普通消息追加任务不会创建该绑定，仍会保留完成指令，不能据此验证零注入。
 
 ## 支持的 CLI / Agent
+
+可选的 [OpenViking 共享记忆示例](examples/openviking-memory/README.md)让所有具备 shell 的 coding agent 共用用户与项目记忆，自主搜索、读取和保存重要结论。**默认关闭**，通过公共 Skill/CLI 显式绑定本地 Agent 或单用户 Bot；Codex 自动会话采集作为独立可选适配。（该示例仅存在于源码仓库的 `examples/`，npm 包不打包 `examples/`，此链接在 npm 页面不可达。）
 
 `bots.json` 里用 `cliId` 一键切换。**20+ 适配器**，覆盖本地 CLI（进程隔离，`tmux attach` 可直连）和 API / 云 Agent（如 Mira、riff——通过 API / 远端接入，非本地进程；mojo 为 API 驱动、默认在宿主机执行工具，可配 cloud: true 走云沙箱）。代表项：
 
@@ -197,3 +201,5 @@ botmux 不重新实现记忆、上下文管理、工具调用、权限体系—�
 <p align="center">好用的话，顺手点个 ⭐ Star 吧 → <a href="https://github.com/deepcoldy/botmux">deepcoldy/botmux</a></p>
 
 [建群参数与默认配置](docs/guide/group-creation.md)
+
+编译单文件二进制前须先执行 `bun run build`，生成用于内嵌的 `dist/.runtime-build-id`；编译版不在运行时读取此文件。

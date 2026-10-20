@@ -66,12 +66,18 @@ const CONSUMERS: Record<string, Rule> = {
       + 'session), and a scratch has no CLI session, hence no remote lineage.',
     count: 2,
   },
-  'core/worker-pool.ts::forkSession::closeSession': {
+  'core/worker-pool.ts::forkFromSource::closeSession': {
+    category: 'impossible_by_invariant',
+    why: 'Evicts disposable command scratches (worker:null, never ran a CLI) at the '
+      + 'fork target anchor. No turn ever ran in them, so no remote session exists.',
+    count: 1,
+  },
+  'core/worker-pool.ts::mintAndSpawnChild::closeSession': {
     category: 'impossible_by_invariant',
     why: 'Rolls back a just-created fork CHILD whose worker never started (slot lost '
       + 'before registration, or spawn threw). No turn ran, so no remote session '
       + 'was ever created for it.',
-    count: 3,
+    count: 2,
   },
   // ── user surfaces: must render refusal AND residual ──────────────────────
   'core/dismiss-command.ts::dismissSessionGroup::closeSession': {
@@ -79,12 +85,23 @@ const CONSUMERS: Record<string, Rule> = {
     why: '/dismiss returns refusal/residual details to the command handler and '
       + 'preserves the group unless closure is known and clean; test/dismiss-command.test.ts covers both.',
   },
+  'core/dismiss-command.ts::closeOne::closeSession': {
+    category: 'user_surface',
+    why: '/dismiss co-resident sessions of this bot: a refusal, unknown session or residual is '
+      + 'reported per session and keeps both the resident session and the group.',
+  },
   'core/command-handler.ts::handleCommand::closeSession': {
     category: 'user_surface',
     why: '/close, /lane close, shared-adopt /detach and /disconnect, and same-daemon '
       + '/close wt siblings all branch on refused/residual results; none report '
       + 'ordinary success or remove a worktree while cleanup is unproven.',
     count: 6,
+  },
+  'core/command-handler.ts::runResume::closeSession': {
+    category: 'impossible_by_invariant',
+    why: '/resume evicts only an isResumeRecoveryPlaceholder at its own anchor: '
+      + 'worker-less, no conversation history, never launched a CLI, not adopted / '
+      + 'queued / headless. No remote session or local subtree can exist for it.',
   },
   'core/command-handler.ts::commitRepoSelection::closeSession': {
     category: 'user_surface',
@@ -112,7 +129,11 @@ const CONSUMERS: Record<string, Rule> = {
     category: 'user_surface',
     why: 'Close route: serialises the whole result; the closed-row fast path '
       + 'replays the residual.',
-    count: 4,
+    count: 2,
+  },
+  'core/dashboard-ipc-server.ts::closeCurrentGeneration::closeSession': {
+    category: 'infrastructure',
+    why: 'The close route returns the complete refusal/residual result unchanged; this wrapper only captures the pool-selected generation release ticket.',
   },
 
   // ── background: no UI, so refusal/residual must be logged ────────────────
@@ -143,6 +164,12 @@ const CONSUMERS: Record<string, Rule> = {
     why: 'Scheduled-run teardown; a refusal leaves the row active and is logged by '
       + 'closeSession itself. No user surface at schedule time.',
     count: 2,
+  },
+  'core/failed-turn-recovery.ts::recoverFailedTurn::closeSessionForBackgroundCleanup': {
+    category: 'background',
+    why: 'Host recovery uses the native background wrapper to log refusal and '
+      + 'residual details, and dispatches a replacement only on clean closed. '
+      + 'Any other outcome retains a durable dispatch_unknown fence.',
   },
   'core/trigger-session.ts::reconcileIdempotencyLeasesOnBoot::closeSessionForBackgroundCleanup': {
     category: 'background',
@@ -365,6 +392,10 @@ const RESPONSE_CONSUMERS: Record<string, ResponseRule> = {
   },
   'core/command-handler.ts::handleCommand::close-route': {
     why: 'Cross-daemon /close wt parses residual and refuses worktree removal when remote teardown is incomplete.',
+    mustParse: true,
+  },
+  'core/dismiss-command.ts::closeOne::close-route': {
+    why: '/dismiss closes peer bots\' sessions in the group; residual is reported and keeps the group.',
     mustParse: true,
   },
   'core/dashboard-ipc-server.ts::<module>::close-route': {

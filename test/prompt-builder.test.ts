@@ -176,6 +176,80 @@ describe('buildNewTopicPrompt', () => {
     expect(routing).not.toContain('&amp;lt;');
   });
 
+  it('adds the durable scheduling skill hint to a Remote Runner opening', () => {
+    const output = buildNewTopicPrompt(
+      '帮我继续修这个问题', SESSION_ID, 'remote-runner', undefined, undefined, undefined, undefined, undefined,
+      { name: 'Bot', openId: 'ou_bot' }, 'zh', undefined,
+      { larkAppId: 'app_test', chatId: 'oc_1' },
+    );
+    expect(output).toContain('<botmux_builtin_skills>');
+    expect(output).toContain('botmux-schedule');
+    expect(output).toContain('Remote Runner 临时环境');
+    expect(output).toContain('必须使用持久化的 `botmux schedule`');
+    expect(output).toContain('cron_create');
+    expect(output).not.toContain('<botmux_schedule_policy>');
+    expect(output).not.toContain('- botmux-ask:');
+  });
+
+  it('keeps the ordinary schedule skill metadata unchanged on local backends', () => {
+    const local = buildNewTopicPrompt(
+      '帮我定个提醒', SESSION_ID, 'traex', undefined, undefined, undefined, undefined, undefined,
+      { name: 'Bot', openId: 'ou_bot' }, 'zh', undefined,
+      { larkAppId: 'app_test', chatId: 'oc_1', sessionBackendType: 'tmux' },
+    );
+    expect(local).toContain('botmux-schedule');
+    expect(local).not.toContain('Remote Runner 临时环境');
+    expect(local).not.toContain('cron_create');
+  });
+
+  it('does not advertise the Remote Runner scheduling boundary without Lark transport', () => {
+    mockBotConfig.apiOnly = true;
+    try {
+      const output = buildNewTopicPrompt(
+        '帮我定个提醒', SESSION_ID, 'remote-runner', undefined, undefined, undefined, undefined, undefined,
+        { name: 'Bot', openId: 'ou_bot' }, 'zh', undefined,
+        { larkAppId: 'app_test', chatId: 'oc_1', sessionBackendType: 'remote-runner' },
+      );
+      expect(output).not.toContain('Remote Runner 临时环境');
+      expect(output).not.toContain('cron_create');
+    } finally {
+      delete mockBotConfig.apiOnly;
+    }
+  });
+
+  it('respects zero prompt injection for Remote Runner sessions', () => {
+    const output = buildNewTopicPrompt(
+      '帮我定个提醒', SESSION_ID, 'remote-runner', undefined, undefined, undefined, undefined, undefined,
+      { name: 'Bot', openId: 'ou_bot' }, 'zh', undefined,
+      { larkAppId: 'app_test', chatId: 'oc_1', sessionBackendType: 'remote-runner', promptInjection: 'none' },
+    );
+    expect(output).toBe('帮我定个提醒');
+    expect(output).not.toContain('Remote Runner 临时环境');
+  });
+
+  it('puts the Cursor background-task note inside <botmux_routing> for cursor only (#1504)', () => {
+    const cursor = buildNewTopicPrompt('hello', SESSION_ID, 'cursor');
+    const routing = cursor.slice(cursor.indexOf('<botmux_routing>'), cursor.indexOf('</botmux_routing>'));
+    expect(routing).toContain('后台任务');
+    expect(routing).toContain('Briefly inform the user about the task result');
+    expect(routing).toContain('不是飞书用户的新消息');
+
+    const codex = buildNewTopicPrompt('hello', SESSION_ID, 'codex');
+    expect(codex).not.toContain('Briefly inform the user about the task result');
+    expect(codex).not.toContain('后台任务');
+  });
+
+  it('omits the Cursor background-task note in zero-injection mode (promptInjection none)', () => {
+    // Zero-injection sends only the user's text — no <botmux_routing> at all,
+    // so the cursor-only routing line must not leak through either variant.
+    const zero = buildNewTopicPrompt('hello', SESSION_ID, 'cursor', undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, { promptInjection: 'none' });
+    expect(zero).not.toContain('<botmux_routing>');
+    expect(zero).not.toContain('Briefly inform the user about the task result');
+    expect(zero).not.toContain('后台任务');
+    expect(zero).toContain('hello');
+  });
+
   it('gives Hermes the standard botmux-send routing hints like other structured-bridge CLIs', () => {
     // #365 previously steered Hermes AWAY from `botmux send` (reverse guidance)
     // as a redundant belt-and-braces on top of the real dedup fix
@@ -1335,4 +1409,54 @@ describe('async group message input contract', () => {
         expect(out.content).toContain('BOTMUX_NOTHING_TO_SEND');
       }
     });
+});
+
+describe('senderTagHideEmail', () => {
+  const sender = Object.freeze({ openId: 'ou_email_test', type: 'user' as const, name: 'Test User', email: 'sender@example.test' });
+  afterEach(() => {
+    delete mockBotConfig.senderTagHideEmail;
+    delete mockBotConfig.senderTag;
+  });
+
+  it('preserves default output and omits only email without mutating identity', () => {
+    const original = renderSenderTag(sender, 'app_test');
+    expect(original).toContain('email="sender@example.test"');
+    mockBotConfig.senderTagHideEmail = false;
+    expect(renderSenderTag(sender, 'app_test')).toBe(original);
+    mockBotConfig.senderTagHideEmail = true;
+    expect(renderSenderTag(sender, 'app_test')).toBe(original.replace(' email="sender@example.test"', ''));
+    expect(sender.email).toBe('sender@example.test');
+    expect(renderSenderTag({ ...sender, email: undefined }, 'app_test')).toBe(original.replace(' email="sender@example.test"', ''));
+    mockBotConfig.senderTag = false;
+    expect(renderSenderTag(sender, 'app_test')).toBe('');
+    mockBotConfig.senderTag = true;
+    expect(renderSenderTag(sender, 'app_test')).not.toContain('email=');
+  });
+
+  it.each(['claude-code', 'codex', 'codex-app', 'cursor'] as const)('covers opening, follow-up and sidecars for %s', cliId => {
+    const build = () => {
+      const opts = { larkAppId: 'app_test', chatId: 'oc_test', cliId, sender, locale: 'en' as const };
+      return [
+        buildNewTopicCliInput('hello', 'sid', cliId, undefined, undefined, undefined,
+          undefined, undefined, undefined, 'en', sender, opts),
+        buildFollowUpCliInput('hello', 'sid', opts),
+      ];
+    };
+    const original = build();
+    mockBotConfig.senderTagHideEmail = true;
+    const hidden = build();
+    for (let i = 0; i < hidden.length; i++) {
+      const before = JSON.stringify(original[i]);
+      const after = JSON.stringify(hidden[i]);
+      expect(before).toContain('sender@example.test');
+      expect(after).not.toContain('sender@example.test');
+      expect(after).toContain('ou_email_test');
+      expect(after).toContain('Test User');
+      expect(after).toBe(before.replaceAll(' email=\\"sender@example.test\\"', ''));
+    }
+    const buffered = renderBufferedSenderBlock(sender, cliId, 'en', 'app_test');
+    expect(buffered).not.toContain('email=');
+    expect(buffered).toContain('ou_email_test');
+    expect(buildFollowUpContent('body@example.test', 'sid', { cliId, sender, larkAppId: 'app_test' })).toContain('body@example.test');
+  });
 });

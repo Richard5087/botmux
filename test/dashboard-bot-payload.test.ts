@@ -37,11 +37,11 @@ describe('dashboard bot payload helpers', () => {
       'displayName', 'larkBotName',
       'defaultOncall', 'defaultWorkingDir', 'defaultWorkingDirAutoWorktree',
       'autoboundChatCount', 'brandLabel',
-      'sandbox', 'sandboxPaths', 'readIsolationSupported', 'backendType',
+      'sandbox', 'sandboxPaths', 'readIsolationSupported', 'backendType', 'defaultBackendType',
       'usageDisplay', 'usageSupported',
       'disableStreamingCard', 'hiddenStreamingCardButtons', 'pinStreamingCard', 'silentTurnReactions',
       'codexAppCleanInput', 'codexBrowser', 'writableTerminalLinkInCard', 'privateCard',
-      'cotEnabled', 'senderTag', 'overloadAlert', 'botToBotSameDir', 'autoInviteOwnerOnGroupAdd', 'quotaFallbackBot',
+      'cotEnabled', 'senderTag', 'senderTagHideEmail', 'overloadAlert', 'botToBotSameDir', 'autoInviteOwnerOnGroupAdd', 'quotaFallbackBot',
       'autoStartOnGroupJoin', 'autoStartOnGroupJoinPrompt', 'autoStartOnGroupJoinSeed', 'autoStartOnGroupJoinSeedDefault',
       'groupJoinCommandEnabled', 'groupJoinCommand',
       'autoStartOnNewTopic',
@@ -55,10 +55,35 @@ describe('dashboard bot payload helpers', () => {
       'maxLiveWorkers', 'idleSuspendMinutes', 'logicalSessionCount', 'residentSessionCount', 'dormantSessionCount',
       'nativeSubagentRuntime',
       'sessionOwnerReminder',
-      'startupCommands', 'customPassthroughCommands', 'canTalkDaemonCommands', 'launchShell', 'env',
-      'riff', 'skills',
+      'startupCommands', 'customPassthroughCommands', 'canTalkDaemonCommands', 'launchShell', 'env', 'envKeys', 'envPolicy',
+      'riff', 'skills', 'herdr',
     ];
     expect(Object.keys(row)).toEqual(expect.arrayContaining(editableFields));
+  });
+
+  it('passes the herdr placement block through to the browser, degrading non-objects to null', () => {
+    const herdr = { sessionName: 'default', placement: 'split', tab: '3', splitDirection: 'right', chatTypes: ['group'] };
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr })).toMatchObject({ herdr });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, {})).toMatchObject({ herdr: null });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr: null })).toMatchObject({ herdr: null });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { herdr: ['split'] })).toMatchObject({ herdr: null });
+  });
+
+  it('keeps stored env names and env policy across a page refresh (values stay write-only)', () => {
+    // Regression: the aggregated row dropped envKeys/envPolicy, so after reload
+    // the editor showed "∅" and the policy snapped back to inherit.
+    const row = botDefaultsPayload({ larkAppId: 'app' }, {
+      env: '',
+      envKeys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 42],
+      envPolicy: { mode: 'strict', inherit: ['HTTPS_PROXY'] },
+    });
+    expect(row).toMatchObject({
+      env: '',
+      envKeys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'],
+      envPolicy: { mode: 'strict', inherit: ['HTTPS_PROXY'] },
+    });
+    expect(botDefaultsPayload({ larkAppId: 'app' }, { envPolicy: { mode: 'bogus' } }))
+      .toMatchObject({ envKeys: [], envPolicy: { mode: 'inherit' } });
   });
 
   it('exposes native subagent policy only in private Bot Defaults payloads', () => {

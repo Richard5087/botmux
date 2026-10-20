@@ -10,7 +10,7 @@
  * 透传卡不得注入。
  */
 import { t, type Locale } from '../../i18n/index.js';
-import { durableCoordinationPrimaryActive } from '../../services/durable-coordination-runtime.js';
+import { coordinationModeIsPrimary } from '../../services/durable-coordination-runtime.js';
 import type { ReplyCardFooter } from './md-card.js';
 
 export const REPLY_CARD_ACTIONS_ELEMENT_ID = 'botmux_reply_actions';
@@ -35,7 +35,7 @@ export function buildReplyCardActionOverflow(binding: ReplyCardActionBinding, lo
   const options: Array<{ text: { tag: 'plain_text'; content: string }; value: ReplyCardMenuOption }> = [
     { text: { tag: 'plain_text', content: t('card.reply_actions.terminal', undefined, locale) }, value: 'terminal' },
     { text: { tag: 'plain_text', content: t('card.reply_actions.model', undefined, locale) }, value: 'model' },
-    ...(durableCoordinationPrimaryActive() ? [] : [{
+    ...(coordinationModeIsPrimary() ? [] : [{
       text: { tag: 'plain_text' as const, content: t(binding.adopt ? 'card.reply_actions.disconnect' : 'card.reply_actions.close', undefined, locale) },
       value: 'close' as const,
     }]),
