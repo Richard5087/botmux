@@ -1080,8 +1080,8 @@ export const messages: Record<string, string> = {
   'ai.credentials.on_bytedcli_auth_failure': '遇到 ByteCloud / Codebase 鉴权失败（bytedcli 或 codebase 命令）：原样说明失败。stderr 已附授权链接时按「stderr 附链接」流程处理；未附链接时提示用户发 /login bytedcli。凭证沿用本轮注入的用户身份。',
   'ai.credentials.on_auth_link': '如果命令被拒、stderr 里直接给了授权链接（accounts.feishu.cn/device/verify、ByteCloud/cloud.bytedance 或中心化平台凭据页链接）和「点开授权后重试」说明：立刻用 botmux send 把那段说明和链接原样转发给用户（链接逐字转发、不改写/编码/加标点；保留「只需授权一次、自动续期」的提示让用户知道只点这一次），然后停下等授权，不要换其它身份重试、不要假装成功，也不必再跑 botmux auth request。用户授权后会再叫你，到时重试即可。',
   // missing_scope 是「授权了但这一项没批」，跟「没授权」是两回事：不要让用户重跑普通授权，
-  // 那只会拿到同样的权限再失败一次。飞书已经把缺的 scope 名字列出来了，照抄即可。
-  'ai.credentials.on_missing_scope': '如果报 missing_scope（99991679），由 Agent 运行 `botmux auth request --scope "<所需权限>" --json`，再用 `botmux send` 发回 authUrl。飞书错误若列出满足同一操作的候选权限，选择其中一个即可，例如 im:chat、im:chat:readonly、im:chat:read 选择 im:chat:read。不同操作各自需要的独立权限才合并请求。说明本次请求的权限，再运行 `botmux auth wait --request-id <requestId> --json`，收到 ready 后以本轮用户身份重试原操作。',
+  // 那只会拿到同样的权限再失败一次。补授权按已确定的任务步骤汇总，不逐个报错逐次申请。
+  'ai.credentials.on_missing_scope': '遇到 missing_scope 时不要重跑普通 /login。依据当前任务已确定的操作和工具文档，一次合并所需权限；同一操作的候选权限只选一个，不逐项发链接，不申请无关或未经核实的权限。运行 `botmux auth request --scope "<所需权限>" --json`，说明用途并用 `botmux send` 发送 authUrl；再运行 `botmux auth wait --request-id <requestId> --json`，仅在 ready 后以本轮用户身份重试。仍失败时按实际错误处理，不循环登录。',
   'ai.identity.routing_intro': '群里可能有多个 bot，按 @名字 和 open_id 区分归属：',
   'ai.identity.rule_own_part': '- 只做分给自己的部分，不抢别的 bot 的活',
   'ai.identity.rule_silent_when_other': '- 整条消息都指派给别的 bot 时保持沉默',
@@ -1942,6 +1942,7 @@ export const messages: Record<string, string> = {
   'worker.transcriptLabel': '会话存储',
   'worker.submit_impossible': '⚠️ 刚才那条消息没有安全写入 {cliName}。\n原因：{reason}\n请处理上述原因并确认终端状态后再试。\n开头：{preview}',
   'worker.activation_submit_unconfirmed': '⚠️ 首条消息的提交尚未确认\n阶段：输入提交\n错误码：submit_unconfirmed\nBotMux 尚未在{transcriptLabel}确认 {cliName} 收到首条消息；它可能仍在执行或已经执行。后续消息会等待这条确认。\n请打开 Web 终端核对原输入与执行状态；若原输入仍未提交，请在终端完成提交。BotMux 会继续观察原提交回执，确认到达后自动释放队列。\n此时在飞书重发只会继续排队。若终端无法恢复，请关闭该会话后重新开始。\n原消息：{preview}',
+  'worker.startup_command_unconfirmed': '⚠️ 启动命令 {command} 尚未确认执行\n{cliName} 在 {secs} 秒内没有留下执行记录，首条消息已暂存在队列中，尚未提交，避免和命令拼在一起。\n请打开 Web 终端查看：命令若仍停在输入框里，按回车执行即可。确认执行后，BotMux 会自动投递暂存的消息。',
   'worker.submit_unconfirmed': '⚠️ 消息提交自动确认失败\n阶段：输入提交\n错误码：submit_unconfirmed\nBotMux 未能在{transcriptLabel}确认 {cliName} 已接收这条消息。自动确认失败不代表消息一定没有执行：它可能仍在执行或已经执行。\n请打开 Web 终端检查输入框与执行状态；确认消息确实未执行后再重发。\n原消息：{preview}',
   'worker.submit_unconfirmed_zmx': '⚠️ 消息提交自动确认失败\n阶段：输入提交\n错误码：submit_unconfirmed\nBotMux 未能在{transcriptLabel}确认 {cliName} 已接收这条消息。自动确认失败不代表消息一定没有执行：它可能仍在执行或已经执行。\n不要直接重发；请在本机运行 botmux list，进入该 ZMX 会话检查输入框与执行状态，确认消息确实未执行后再重发。\n原消息：{preview}',
   'worker.zmx_recovery_pending': 'ZMX 控制面暂时无法确认会话身份，自动清理没有执行。不要直接重发；请在本机运行 botmux list 进入会话，检查并按 Ctrl+C 清空输入框，然后用 /restart 重启会话后再试。',
