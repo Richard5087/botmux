@@ -76,12 +76,17 @@ function withCapability(base: string, name: 'token' | 'viewToken', value: string
 }
 
 /** Whether read-only terminal links route through the central platform's
- * authenticated front door (remote access on AND this machine is bound).
+ * authenticated front door. All three must hold:
+ *  • remote access is enabled AND this machine is bound (a t- subdomain base);
+ *  • the local terminal proxy is up — buildTerminalUrl only emits the platform
+ *    URL inside `if (proxyReady)`, otherwise it falls back to a local worker URL,
+ *    so claiming the platform entry without a proxy would hand out a link that
+ *    is not actually fronted by the platform.
  * When true, issuing a read-only `viewToken` link is enough: an owner signed in
  * via the platform (Feishu SSO) is upgraded to write by terminal-write-auth,
  * while teammates/guests stay read-only — no private write token needed. */
 export function platformTerminalReadEntryActive(): boolean {
-  return isRemoteAccessEnabled() && !!platformTerminalBaseUrl();
+  return proxyReady && isRemoteAccessEnabled() && !!platformTerminalBaseUrl();
 }
 
 export function buildTerminalUrl(

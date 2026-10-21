@@ -156,6 +156,7 @@ vi.mock('../src/services/model-catalog.js', () => ({
 }));
 
 import { handleCardAction } from '../src/im/lark/card-handler.js';
+import { setTerminalProxyPort, resetTerminalProxy } from '../src/core/terminal-url.js';
 import { canOperate } from '../src/im/lark/event-dispatcher.js';
 import { getBot } from '../src/bot-registry.js';
 import { sessionKey, type DaemonSession } from '../src/core/types.js';
@@ -265,6 +266,7 @@ beforeEach(() => {
   detectModelsMock.mockReset().mockResolvedValue(null);
   remoteAccessEnabledMock.mockReset().mockReturnValue(false);
   platformTerminalBaseUrlMock.mockReset().mockReturnValue(null);
+  resetTerminalProxy();
 });
 
 // ─── toggle gate ──────────────────────────────────────────────────────────
@@ -576,6 +578,7 @@ describe('reply_card_menu terminal option under a bound platform', () => {
     enableMenu();
     remoteAccessEnabledMock.mockReturnValue(true);
     platformTerminalBaseUrlMock.mockReturnValue('https://t-m1.example.com');
+    setTerminalProxyPort(9100);
     const ds = makeDs({ workerPort: 9000, workerToken: 'write-tok', workerViewToken: 'view-tok' } as any);
     readableTerminalUrlMock.mockReturnValue('https://t-m1.example.com/s/sess-menu-1?viewToken=view-tok');
     const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
@@ -613,6 +616,18 @@ describe('reply_card_menu terminal option under a bound platform', () => {
     // remote access off / no binding: mocks reset to false/null in beforeEach.
     const ds = makeDs({ workerPort: 9000, workerToken: 'tok' } as any);
     const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
+    expect(deliverWriteLinkCardMock).toHaveBeenCalledTimes(1);
+    expect(result.toast.type).toBe('success');
+  });
+
+  it('does not claim the platform read entry when the terminal proxy is not up', async () => {
+    enableMenu();
+    remoteAccessEnabledMock.mockReturnValue(true);
+    platformTerminalBaseUrlMock.mockReturnValue('https://t-m1.example.com');
+    resetTerminalProxy(); // bound + remote access on, but no proxy → not a real platform front door
+    const ds = makeDs({ workerPort: 9000, workerToken: 'tok' } as any);
+    const result = await handleCardAction(menuData('terminal'), depsWith(ds), LARK_APP_ID);
+    // Falls back to the original private write-link path, never a fake read card.
     expect(deliverWriteLinkCardMock).toHaveBeenCalledTimes(1);
     expect(result.toast.type).toBe('success');
   });

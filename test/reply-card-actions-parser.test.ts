@@ -81,3 +81,45 @@ describe('stamped select_static controls in parsed history', () => {
     expect(extractCardContent(thirdParty)).toContain('选项一');
   });
 });
+
+describe('unstamped botmux controls still dropped via the internal-action wordlist', () => {
+  // The egress marker is the primary signal; the wordlist is the fallback for a
+  // delivery path that never stamped the card (no "old card" rationale — these
+  // controls are new, the fallback just covers an unstamped send).
+  function unstampedOverflow(action: string): string {
+    return cardWith([
+      { tag: 'markdown', content: '正文' },
+      {
+        tag: 'overflow',
+        value: { action },
+        options: [
+          { text: { tag: 'plain_text', content: '打开终端' }, value: 'terminal' },
+          { text: { tag: 'plain_text', content: '切换模型' }, value: 'model' },
+        ],
+      },
+    ]);
+  }
+
+  it('drops an unstamped reply_card_menu overflow via the wordlist', () => {
+    const text = extractCardContent(unstampedOverflow('reply_card_menu'));
+    expect(text).toContain('正文');
+    expect(text).not.toContain('打开终端');
+    expect(text).not.toContain('切换模型');
+    expect(text).not.toContain('[下拉');
+  });
+
+  it('keeps dropping an unstamped reply_model_pick select via the wordlist', () => {
+    const raw = cardWith([{
+      tag: 'action',
+      actions: [{
+        tag: 'select_static',
+        placeholder: { tag: 'plain_text', content: '切换模型' },
+        options: [{ text: { tag: 'plain_text', content: 'fable' }, value: 'fable' }],
+        value: { action: 'reply_model_pick' },
+      }],
+    }]);
+    const text = extractCardContent(raw);
+    expect(text).not.toContain('fable');
+    expect(text).not.toContain('[下拉');
+  });
+});
