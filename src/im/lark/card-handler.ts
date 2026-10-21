@@ -4,6 +4,8 @@
  * Extracted from daemon.ts for modularity.
  */
 import { sessionPromptInjection } from '../../core/prompt-injection.js';
+import { normalizeCardActionData } from './card-action-data.js';
+import { logCardActionDiagnostics } from './card-action-diagnostics.js';
 import { existsSync } from 'node:fs';
 import { basename as pathBasename, dirname, join } from 'node:path';
 import { closeResidualIsLocal, describeCloseResidual } from '../../core/close-residual.js';
@@ -84,7 +86,7 @@ import { modelCatalogProbeContext } from '../../dashboard/model-catalog-request.
 import { selectionKeyForBot } from '../../setup/cli-selection.js';
 import { coordinationModeIsPrimary } from '../../services/durable-coordination-runtime.js';
 import { REPLY_CARD_MENU_ACTION } from './reply-card-actions.js';
-import { setSessionReasoningEffort, forkWorker, sendWorkerInput, sendWorkerSessionInput, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, freezeSessionSandboxDecision, sessionAcceptsDirectCommand, buildStreamingCardJson, idleCardLabel, dshRuntimeForSession, type WorkerSessionReplyOptions, postFreshStreamingCard, displayableStreamingCardImageKey, canExpectFreshStreamingScreenshot, restoreStreamingCardIdentityFromProof, streamingCardPresentationImageKey } from '../../core/worker-pool.js';
+import { setSessionReasoningEffort, forkWorker, killWorker, suspendWorker, sendWorkerInput, sendWorkerSessionInput, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, freezeSessionSandboxDecision, sessionAcceptsDirectCommand, buildStreamingCardJson, streamCardLabel, dshRuntimeForSession, type WorkerSessionReplyOptions, postFreshStreamingCard, displayableStreamingCardImageKey, canExpectFreshStreamingScreenshot, restoreStreamingCardIdentityFromProof, streamingCardPresentationImageKey } from '../../core/worker-pool.js';
 import { reconcileResumedStreamingCard } from '../../core/resume-streaming-card.js';
 import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { markInitialUserTurnPending } from '../../core/initial-user-turn.js';
@@ -98,7 +100,9 @@ import type { DaemonSession } from '../../core/types.js';
 import { readPrincipalLaneTurnBinding } from '../../core/principal-lane-turn.js';
 import { buildTerminalUrl, platformTerminalReadEntryActive } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
-import { createRepoWorktree, removeRepoWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
+import { createRepoWorktree, removeRepoWorktree, restoreDeletedWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
+import { repinSessionWorkingDir } from '../../core/session-cwd.js';
+import { workingDirRecoveryPending } from '../../core/working-dir-recovery.js';
 import { withCodexAppContext } from '../../utils/codex-app-context.js';
 import { handleCommand } from '../../core/command-handler.js';
 import {
@@ -170,7 +174,7 @@ export interface CardHandlerDeps {
 }
 
 /**
- * Lark card action callback envelope.
+ * Normalized Lark card action data (see normalizeCardActionData).
  *
  * Exported so module-specific dashboard handlers can share the callback type
  * without redeclaring it.
@@ -512,6 +516,59 @@ function deferRepoCardWithdraw(larkAppId: string | undefined, messageId: string 
  * directory-entry form. Extracted to module scope so the form-submit branch can
  * reuse the exact same spawn/switch path instead of duplicating it.
  */
+type RepoCommitContext = Parameters<typeof commitRepoSelection>[0];
+
+/** The recovery card outlived its purpose (the directory came back, or `/cd`
+ *  moved the session): say so and take the card down. */
+async function retireMootRecoveryCard(ctx: RepoCommitContext): Promise<void> {
+  const { ds, rootId, cardMessageId, larkAppId, sessionReply } = ctx;
+  const cardToWithdraw = cardMessageId ?? ds.repoCardMessageId;
+  markRepoCardConsumed(ds, cardToWithdraw);
+  ds.repoCardMessageId = undefined;
+  ds.workingDirRecovery = undefined;
+  await sessionReply(rootId, t('card.repo.recovery_resolved', undefined, localeForBot(ds.larkAppId)));
+  deferRepoCardWithdraw(larkAppId, cardToWithdraw);
+}
+
+/** Point a session whose directory was deleted at `dirPath`, keeping the
+ *  session and its CLI conversation: the same retirement as `/cd`, so nothing
+ *  keeps running against the old path — a backing pane left over from before
+ *  the deletion would otherwise be re-attached instead of a CLI started here.
+ *  The next message resumes in `dirPath`. */
+async function moveSessionForRecovery(
+  ctx: RepoCommitContext,
+  dirPath: string,
+  riffRepoDirs?: string[],
+): Promise<boolean> {
+  const { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply } = ctx;
+  const targetSessionId = ds.session.sessionId;
+  const cardToWithdraw = cardMessageId ?? ds.repoCardMessageId;
+  const outcome = await withBotTurnMutation(ds.larkAppId, async () => {
+    const current = [...activeSessions.values()].find(
+      candidate => candidate.session.sessionId === targetSessionId
+        && candidate.session.status === 'active',
+    );
+    if (!current || current !== ds) return 'gone' as const;
+    if (hasProtectedSessionMutationOwnership(current)) return 'pending' as const;
+    const suspended = !current.adoptedFrom && suspendWorker(current, 'working_dir_changed');
+    if (!suspended) killWorker(current);
+    repinSessionWorkingDir(current, dirPath);
+    current.session.riffRepoDirs = riffRepoDirs;
+    sessionStore.updateSession(current.session);
+    markRepoCardConsumed(current, cardToWithdraw);
+    current.repoCardMessageId = undefined;
+    current.workingDirRecovery = undefined;
+    return 'moved' as const;
+  });
+  if (outcome === 'pending') {
+    await sessionReply(rootId, '当前会话仍有待提交消息，暂不能切换仓库；请等待提交完成或关闭会话。');
+    return false;
+  }
+  if (outcome === 'gone') return false;
+  deferRepoCardWithdraw(larkAppId, cardToWithdraw);
+  return true;
+}
+
 export async function commitRepoSelection(
   ctx: {
     ds: DaemonSession;
@@ -578,6 +635,26 @@ export async function commitRepoSelection(
       '当前会话仍有待提交消息，暂不能切换仓库；请等待提交完成或关闭会话。',
     );
     return false;
+  }
+
+  // The working-directory recovery card moves the SAME session (like `/cd`);
+  // it must never reach the mid-session switch below, which closes it.
+  if (!ds.pendingRepo && cardMessageId !== undefined
+    && ds.workingDirRecovery?.cardMessageId === cardMessageId) {
+    if (!workingDirRecoveryPending(ds)) {
+      await retireMootRecoveryCard(ctx);
+      return false;
+    }
+    const moved = await moveSessionForRecovery(ctx, dirPath, opts?.riffRepoDirs);
+    if (moved) {
+      await sessionReply(rootId, t(
+        opts?.suppressConfirmReply ? 'card.repo.recovery_resend_hint' : 'card.repo.recovery_switched',
+        { path: dirPath },
+        locTarget,
+      ));
+      logger.info(`[${tag(ds)}] Working directory recovered: session moved to ${dirPath}`);
+    }
+    return moved;
   }
 
   if (ds.pendingRepo) {
@@ -1454,7 +1531,9 @@ function buildMenuModelPickerCard(
   });
 }
 
-export async function handleCardAction(data: CardActionData, deps: CardHandlerDeps, larkAppId?: string): Promise<any> {
+export async function handleCardAction(input: unknown, deps: CardHandlerDeps, larkAppId?: string): Promise<any> {
+  const data = normalizeCardActionData(input);
+  logCardActionDiagnostics('handler', input, data);
   const { activeSessions, lastRepoScan } = deps;
   // turnId is forwarded only when the caller actually has a turn anchor
   // (e.g. the pendingRepo confirmation) — most card actions have none.
@@ -2911,6 +2990,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const { discoverAdoptableSessions, discoverAdoptableSessionByTarget, excludeOwnedHerdrAdoptTargets } = await import('../../core/session-discovery.js');
     const { discoverAdoptableZellijSessions } = await import('../../core/zellij-adopt-discovery.js');
     async function resolveLive() {
+      if (entryKey!.startsWith('live:orca:')) {
+        const { discoverAdoptableOrcaSessionByHandle } = await import('../../core/orca-adopt-discovery.js');
+        const handle = entryKey!.slice('live:orca:'.length);
+        const target = await discoverAdoptableOrcaSessionByHandle(
+          handle,
+          botCfg.cliId,
+          botCfg.cliRuntime?.executable,
+        );
+        return target && adoptLiveKey(target) === entryKey ? target : undefined;
+      }
       // Zellij keys carry "live:zellij:" — resolve from the zellij backend.
       if (entryKey!.startsWith('live:zellij:')) {
         return discoverAdoptableZellijSessions(botCfg.cliId, botCfg.cliRuntime?.executable)
@@ -3618,7 +3707,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           getDaemonStreamingCardUsageSnapshot(ds, sessionCliId(ds)),
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(sessionCliId(ds), ds.codexServiceTier),
-          idleCardLabel(ds),
+          streamCardLabel(ds),
           dshRuntimeForSession(ds),
           resolveHiddenStreamingCardButtons(getBot(ds.larkAppId).config),
         );
@@ -4189,7 +4278,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       };
       const buildToggleCard = (
         mode: DisplayMode,
-        opts: { canReceiveFreshFrame: boolean; serviceTierBadge: string | undefined; idleLabel: ReturnType<typeof idleCardLabel> },
+        opts: { canReceiveFreshFrame: boolean; serviceTierBadge: string | undefined; idleLabel: ReturnType<typeof streamCardLabel> },
       ): { cardJson: string; unavailable: boolean } => {
         const effectiveCliId = sessionCliId(ds);
         const readUrl = readableTerminalUrlFor(ds);
@@ -4264,7 +4353,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
             // Fresh frames only ever target the current card.
             canReceiveFreshFrame: false,
             serviceTierBadge: codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
-            idleLabel: idleCardLabel(ds),
+            idleLabel: streamCardLabel(ds),
           });
           // Callback-only: an extra updateMessage here is an unqueued second
           // channel to the same message — a delayed PATCH from this click
@@ -4329,7 +4418,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const { cardJson, unavailable } = buildToggleCard(next, {
         canReceiveFreshFrame: isCurrentTarget && displayModeIpcDelivered && canExpectFreshStreamingScreenshot(ds),
         serviceTierBadge: codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
-        idleLabel: idleCardLabel(ds),
+        idleLabel: streamCardLabel(ds),
       });
       if (isCurrentTarget
         && scheduleCardPatch(ds, cardJson, undefined, { userInitiated: true })) {
@@ -4413,7 +4502,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           getDaemonStreamingCardUsageSnapshot(ds, effectiveCliId),
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
-          idleCardLabel(ds),
+          streamCardLabel(ds),
           dshRuntimeForSession(ds),
           resolveHiddenStreamingCardButtons(getBot(ds.larkAppId).config),
         );
@@ -4491,7 +4580,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           getDaemonStreamingCardUsageSnapshot(ds, effectiveCliId),
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
-          idleCardLabel(ds),
+          streamCardLabel(ds),
           dshRuntimeForSession(ds),
           resolveHiddenStreamingCardButtons(getBot(ds.larkAppId).config),
         );
@@ -4697,7 +4786,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           getDaemonStreamingCardUsageSnapshot(ds, effectiveCliId),
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
-          idleCardLabel(ds),
+          streamCardLabel(ds),
           dshRuntimeForSession(ds),
           resolveHiddenStreamingCardButtons(getBot(ds.larkAppId).config),
         );
@@ -4745,6 +4834,58 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         deferRepoCardWithdraw(larkAppId, cardMessageId);
         ds.repoCardMessageId = undefined;
       }
+    }
+
+    // 「🔧 重建 worktree」on the working-directory recovery card: put the deleted
+    // worktree back at its path on its branch, then resume the same session
+    // there. Git can take many seconds, so ack with a toast and finish async.
+    if (actionType === 'repo_rebuild_worktree' && ds) {
+      const locDs = localeForBot(ds.larkAppId);
+      const recovery = ds.workingDirRecovery;
+      if (!cardMessageId || !isActiveRepoCard(ds, cardMessageId) || recovery?.cardMessageId !== cardMessageId) {
+        return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, locDs) } };
+      }
+      if (ds.worktreeCreating || ds.pendingRepoCommitInFlight) {
+        return { toast: { type: 'info', content: t('cmd.repo.worktree_in_progress', undefined, locDs) } };
+      }
+      // Same refusal the other recovery outlets get from commitRepoSelection:
+      // a remote lineage is retired only through its explicit close.
+      if (isRemoteBackendSession(ds)) {
+        await sessionReply(rootId, t('cmd.cd.remote_unsupported', undefined, locDs));
+        return;
+      }
+      const commitCtx = { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply };
+      if (!workingDirRecoveryPending(ds)) {
+        await retireMootRecoveryCard(commitCtx);
+        return;
+      }
+      const origin = recovery.rebuild;
+      if (!origin) return;
+      ds.worktreeCreating = true;
+      void (async () => {
+        try {
+          let creation;
+          try {
+            creation = await restoreDeletedWorktree(origin, recovery.path);
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : String(e);
+            logger.warn(`[${tag(ds)}] Rebuilding deleted worktree ${recovery.path} failed: ${errMsg}`);
+            await sessionReply(rootId, t('card.repo.recovery_rebuild_failed', { error: errMsg }, locDs));
+            return;
+          }
+          // A `/cd` while git ran already moved the session; leave it there.
+          if (ds.workingDirRecovery !== recovery || getSessionWorkingDir(ds) !== recovery.path) return;
+          if (await moveSessionForRecovery(commitCtx, creation.path)) {
+            await sessionReply(rootId, t('card.repo.recovery_rebuilt', { path: creation.path, branch: creation.branch }, locDs));
+            logger.info(`[${tag(ds)}] Rebuilt deleted worktree ${creation.path} on ${creation.branch}`);
+          }
+        } catch (e) {
+          logger.warn(`[${tag(ds)}] Worktree rebuild flow failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          ds.worktreeCreating = false;
+        }
+      })();
+      return { toast: { type: 'info', content: t('card.repo.toast_rebuilding', undefined, locDs) } };
     }
 
     // Manual working-directory entry from the repo card form. The project scan
@@ -4797,7 +4938,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const r = await applyConfigField(ds.larkAppId, spec, next);
       if (!r.ok) return { toast: { type: 'error', content: t('cmd.config.write_failed', { reason: r.reason }, locDs) } };
       const projects = lastRepoScan.get(ds.chatId) ?? [];
-      const newCard = buildRepoSelectCard(projects, getSessionWorkingDir(ds), rootId, locDs, next);
+      const recovery = ds.workingDirRecovery?.cardMessageId === cardMessageId ? ds.workingDirRecovery : undefined;
+      const newCard = buildRepoSelectCard(projects, getSessionWorkingDir(ds), rootId, locDs, next,
+        recovery ? { missingPath: recovery.path, rebuildBranch: recovery.rebuild?.branch } : undefined);
       const oldCardMessageId = ds.repoCardMessageId;
       let newCardMessageId: string;
       try {
@@ -4823,6 +4966,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return { toast: { type: 'error', content: t('cmd.config.write_failed', { reason: err instanceof Error ? err.message : String(err) }, locDs) } };
       }
       ds.repoCardMessageId = newCardMessageId;
+      if (recovery) recovery.cardMessageId = newCardMessageId;
       // The fresh ID is now durable. Withdrawal is best-effort and cannot
       // invalidate the new authority if Lark reports the old card missing.
       try { await deleteMessage(ds.larkAppId, oldCardMessageId); }

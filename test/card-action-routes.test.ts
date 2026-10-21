@@ -197,13 +197,13 @@ describe('敏感动作清单', () => {
   const EXPECTED = [
     'close', 'compact_session', 'disconnect', 'export_text', 'get_write_link', 'open_local_cli', 'open_local_terminal',
     'quote_confirm', 'refresh_screenshot', 'reply_card_menu', 'reply_model_pick',
-    'repo_manual_submit', 'repo_worktree_submit', 'restart', 'resume',
+    'repo_manual_submit', 'repo_rebuild_worktree', 'repo_worktree_submit', 'restart', 'resume',
     'retry_last_task', 'retry_turn', 'set_reasoning_effort', 'skip_repo', 'stop_turn', 'takeover', 'term_action',
     'toggle_display', 'toggle_stream', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_cancel', 'wf_reject',
     'worktree_toggle_mode',
   ];
 
-  it('清单与重构前的手写数组逐项一致（28 项）', () => {
+  it('清单逐项一致（含工作目录恢复卡的重建 worktree）', () => {
     expect([...SENSITIVE_CARD_ACTIONS.keys()].sort()).toEqual(EXPECTED);
   });
 

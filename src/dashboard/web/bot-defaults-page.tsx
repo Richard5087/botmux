@@ -2263,8 +2263,8 @@ export function BotAgentSection(props: {
   const [nativeEffort, setNativeEffort] = useState<'' | NativeEffort>(bot.nativeSubagentRuntime?.reasoningEffort?.mode === 'custom' ? bot.nativeSubagentRuntime.reasoningEffort.value : '');
   const [nativePolicyTouched, setNativePolicyTouched] = useState(false);
   const [nativePolicyErrors, setNativePolicyErrors] = useState<NativePolicyErrors>({ model: null, effort: null });
-  // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty = use
-  // the runner default (10 min). `touched` gates whether a save sends the field
+  // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty means
+  // no runner watchdog. `touched` gates whether a save sends the field
   // at all: an untouched field is omitted so the daemon preserves the exact
   // stored ms (including legal non-whole-minute values) instead of clearing it.
   const [turnTimeoutMin, setTurnTimeoutMin] = useState(turnTimeoutMinFromMs(bot.turnTimeoutMs));
@@ -3317,7 +3317,7 @@ export const DASHBOARD_MAX_TURN_TIMEOUT_MS = 2_147_483_647;
 /**
  * Convert a stored dsh turn timeout (ms) into the minutes string shown in the
  * input. Absent / non-positive / non-integer / over-bound → empty (the field
- * then means "use the runner default"). A legal value that is not a whole
+ * then means "disable the runner watchdog"). A legal value that is not a whole
  * number of minutes is shown as its decimal minutes (trimmed of any float
  * tail) rather than hidden as empty; `parseTurnTimeoutMinInput` re-rounds it to
  * the nearest whole ms, so the displayed value round-trips back to the same ms.
@@ -3331,7 +3331,7 @@ function turnTimeoutMinFromMs(ms: unknown): string {
 
 /**
  * Parse the minutes input for the PUT body. Returns:
- *  - `''`        → cleared (empty input) → daemon reverts to the runner default,
+ *  - `''`        → cleared (empty input) → no runner watchdog,
  *  - a number    → minutes → ms, rounded to the nearest whole ms, a positive
  *                  integer within the arm-able bound,
  *  - `'invalid'` → the operator typed something that is not a clearable blank
@@ -5611,6 +5611,8 @@ function SessionModeSection(props: {
   const [regularStatus, setRegularStatus] = useState<StatusMessage>(null);
   const [mentionStatus, setMentionStatus] = useState<StatusMessage>(null);
   const [docStatus, setDocStatus] = useState<StatusMessage>(null);
+  const [chatManager, setChatManager] = useState(props.bot.chatManagerEnabled === true);
+  const [chatManagerStatus, setChatManagerStatus] = useState<StatusMessage>(null);
 
   useEffect(() => {
     setP2p(normalizeP2pMode(props.bot.p2pMode));
@@ -5623,6 +5625,9 @@ function SessionModeSection(props: {
     props.bot.regularGroupMentionMode,
     props.bot.regularGroupReplyMode,
   ]);
+  useEffect(() => {
+    setChatManager(props.bot.chatManagerEnabled === true);
+  }, [props.bot.chatManagerEnabled]);
 
   async function saveP2p(next: string): Promise<void> {
     const mode = normalizeP2pMode(next);
@@ -5786,6 +5791,19 @@ function SessionModeSection(props: {
       >
         <div className="bd-mode-group-side"><StatusSpan status={mentionStatus} attr={{ 'data-mention-mode-status': '' }} /></div>
       </ModeOptionGroup>
+
+      <ToggleRow
+        checked={chatManager}
+        disabled={busy === 'chatManager'}
+        dataAction="toggle-chat-manager"
+        title={tr('botDefaults.chatManagerTitle')}
+        help={tr('botDefaults.chatManagerHelp')}
+        onChange={checked => {
+          setChatManager(checked);
+          void saveCardMode('chatManager', { chatManagerEnabled: checked }, setChatManagerStatus);
+        }}
+      />
+      <div className="bd-mode-group-side" style={{ margin: '0 0 8px' }}><StatusSpan status={chatManagerStatus} attr={{ 'data-chat-manager-status': '' }} /></div>
 
       <footer className="bd-session-mode-footer">{tr('botDefaults.sessionModeFooter')}</footer>
 
