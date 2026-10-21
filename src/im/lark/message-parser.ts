@@ -1729,10 +1729,13 @@ function firstNonEmptyString(...candidates: unknown[]): string | undefined {
  *  in extractElementText.
  *
  *  Primary detection is the egress-stamped ownership marker
- *  (callback-button-marker.ts). This wordlist is the LEGACY fallback for
- *  cards sent by pre-marker builds (chat history is long-lived), covering
- *  every action dispatched by card-handler as of the fix — it is frozen;
- *  new botmux buttons rely on the marker, not on growing this list.
+ *  (callback-button-marker.ts). This wordlist is a defense-in-depth fallback
+ *  for two cases: cards still in chat history that were sent by pre-marker
+ *  builds (history is long-lived), and any delivery path that fails to stamp
+ *  the egress marker. It covers every action dispatched by card-handler; when
+ *  adding a new internal control that can traverse an unstamped path, register
+ *  it here (with a parser test asserting it does not leak), do not rely on the
+ *  marker alone.
  *  Third-party cards' buttons (Argos 确认/创建群组…) stay: they carry no
  *  marker and their `value` never uses botmux's action vocabulary. */
 const BOTMUX_INTERNAL_CARD_ACTIONS: ReadonlySet<string> = new Set([
